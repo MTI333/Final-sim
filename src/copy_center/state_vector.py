@@ -20,6 +20,9 @@ class CopierSnapshot:
     usage_remaining: float
     usage_threshold: float
     client_id: int | None
+    # Reloj absoluto de fin de atención/mantenimiento en curso, o `None`.
+    service_end_time: float | None
+    maintenance_end_time: float | None
 
 
 @dataclass
@@ -33,6 +36,10 @@ class StateRow:
     iteration: int
     clock: float
     event_type: str  # nombre del EventType, o "INIT" para la fila inicial
+    # Copiadora involucrada en SERVICE_END/MAINTENANCE_END (para etiquetas
+    # como "FinAtC1"); `None` en ARRIVAL/INIT, que no son de una copiadora
+    # puntual.
+    copier_id: int | None
 
     # RND por variable aleatoria (§8 del prompt). `umbral` es una lista
     # porque la fila inicial sortea 3 umbrales a la vez (uno por copiadora);

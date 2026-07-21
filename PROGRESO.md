@@ -573,3 +573,79 @@ vez de reinterpretar el texto para forzar un comportamiento "más razonable".
   decidido en firme (tasa degenerada, no una hipótesis a descartar), cualquier corrida final con
   `max_iterations` alto en el escenario real **va a disparar el problema de rendimiento**, no
   solo en un caso hipotético. Conviene revisarlo antes de generar el resultado de entrega.
+
+---
+
+## Sesión 2026-07-21 (cont.) — Reestructuración del vector de estado según planilla de referencia
+
+### Contexto
+El usuario pasó `VectorEstado_CentroCopiado.xlsx` (formato de referencia para la tabla) y pidió
+nombres de columna más descriptivos, agrupados por evento. Se convirtió a CSV (LibreOffice
+headless, `soffice --convert-to csv`) para poder leerlo y compararlo con `report.py`/`webapp.py`.
+
+### Hecho
+- **Grupo LLEGADA** (turno anterior): `RND_llegada`, `Tiempo_entre_llegadas`, `Proxima_llegada` —
+  coincidió exactamente con la referencia, sin cambios.
+- **Copiadoras autocontenidas** (`entities.py`, `simulation.py`, `state_vector.py`,
+  `report.py`, `webapp.py`): cada copiadora ahora es un grupo de 5 columnas — `Estado`, `AcOcup`
+  (uso acumulado = `usage_threshold - usage_remaining`, complemento de lo que ya trackeábamos),
+  `Umbral` (el umbral fijo sorteado), `FinAten` y `FinMant` (reloj absoluto en que termina la
+  atención/mantenimiento en curso — **nuevo**, no existía como dato expuesto). Se agregaron
+  `Copier.service_end_time`/`maintenance_end_time` (seteados en `_assign_client`/
+  `_start_maintenance`, limpiados en `_process_service_end`/`_process_maintenance_end`) y se
+  propagan vía `CopierSnapshot`.
+- **Se quitó la columna `Cop{i}_Cliente`** (id de cliente por copiadora): la referencia no la
+  tiene — el detalle de qué cliente está en cada lado vive en la sección `CLIENTE 1..N` (ver
+  pendiente abajo), no en el grupo de la copiadora. `format_row`/`render_table` perdieron el
+  parámetro `show_clients`/`hide_clients`, que ya no tenía efecto.
+- **Copiadoras 1-indexadas para mostrar** (`Cop1`/`Cop2`/`Cop3`, "Copiadora 1/2/3" en el resumen):
+  antes eran 0-indexadas (`Cop0`, "Copiadora 0"); la referencia usa 1-indexado. El `id` interno
+  del objeto `Copier` sigue 0-indexado — solo cambió la presentación (`+1` al mostrar).
+  Actualizado en ambos lugares que mostraban el índice: `report.format_summary` y
+  `webapp.render_summary_table`.
+- **Eventos con la copiadora en la propia etiqueta**: `event_label` ahora recibe `copier_id` y
+  arma `FinAtC{n}`/`FinMantC{n}` (n = id 1-indexado) en vez de `FIN_ATENCION`/`FIN_MANTENIMIENTO`
+  genéricos — igual que la referencia. `INIT` pasó a `"Inicializacion"` (antes `"INICIO"`),
+  también por la referencia. Requirió agregar `StateRow.copier_id` (viene de `event.copier_id`,
+  ya existía en el motor, solo faltaba propagarlo a la fila) y pasarlo en `Simulation.run()`.
+- Grupo de atención renombrado por consistencia con el de llegada: `RND_atenc`/`T_atenc` →
+  `RND_atencion`/`Tiempo_atencion`; `T_umbral` → `Umbral_sorteado`.
+- **Validación:** `py_compile` limpio en todo `src/`. Corrida chica (8 iteraciones, semilla 42)
+  verificada a mano: `Proxima_llegada`, `FinAten`/`FinMant` coinciden exactamente con
+  `reloj + tiempo sorteado` en cada caso; la copiadora que dispara `FinAtC{n}`/pasa a `MANTEN`
+  coincide con la lógica ya validada (mín. `usage_remaining` para preventivo). Corrida también
+  contra el servidor HTTP real (no solo en memoria) — `200 OK`, columnas nuevas presentes.
+
+### Pendiente / próximos pasos
+- **Sección `CLIENTE 1..N` de la referencia** (columnas `Estado` + `Hora de llegada` por cliente,
+  con asignación de "slot" persistente — un cliente conserva su slot hasta irse, no se reordena
+  por fila): todavía no implementada. Decisión ya tomada con el usuario ("depende del
+  escenario"): para una corrida chica de demo se puede mostrar con slots fijos como en la
+  referencia; para la corrida real de entrega (cola sin techo por SUPUESTOS #1 decidido en modo
+  literal) se mantiene el diseño actual (solo longitud de cola, sin enumerar clientes) —
+  DECISIONES.md D5/D12 siguen aplicando ahí sin cambios.
+- Los ejemplos de salida en `README.md` (bloque de ejemplo con columnas viejas) y las menciones a
+  nombres de columna en `VALIDACION.md`/`DEFENSA.md` quedaron desactualizados por este cambio —
+  no se tocaron todavía.
+
+### Hecho (cont.) — ajuste fino: nombre y orden exactos de la planilla de referencia
+El usuario pidió explícitamente que el vector de estado respete **nombre y orden** de
+`VectorEstado_CentroCopiado.xlsx`, no solo una reorganización aproximada. Se ajustó de nuevo:
+- **Cabecera de dos líneas** (grupo + columna) en `report.py` (texto plano, `" | "`) y
+  `webapp.py` (`<th colspan>` real, igual que las celdas combinadas del Excel): "No, Evento,
+  Reloj" sin grupo, "LLEGADA CLIENTE" (RND, t e/lleg, prox lleg), "FIN ATENCION (sorteo)" (RND,
+  t aten), "COPIADORA 1/2/3" (Estado, AC Ocup, Umbral, Fin aten, Fin mant), "COLA" (Cola, Cola
+  max) — coincide columna a columna con la planilla, verificado con la fila 0 de la referencia
+  (mismos valores en el mismo orden).
+- **Desvío deliberado, documentado, no silencioso:** la planilla del usuario *no* tiene columna
+  de RND para el sorteo del umbral, ni columnas de Atendidos/Correctivos/Preventivos —  pero
+  `DISEÑO.md §9` exige mostrar el RND de *cada* variable aleatoria (umbral incluido) y las
+  "columnas de apoyo" para las estadísticas de §10. Se optó por no eliminarlas silenciosamente:
+  quedaron agregadas al final, sin group label, después de "Cola max" — no rompen el orden de lo
+  que sí replica la referencia, pero cumplen el requisito del prompt que la planilla (un ejemplo
+  simplificado, aparentemente) no cubre. Señalado explícitamente al usuario, no decidido en
+  silencio.
+- Validado con la fila 0 real (semilla 42): coincide con la fila 0 de
+  `VectorEstado_CentroCopiado.xlsx` en estructura (aunque los RND no coinciden número a número —
+  la planilla usa valores "lindos" a mano, no una semilla de `random.Random`). Snapshot de la
+  webapp real publicado como Artifact para que el usuario lo revise visualmente.

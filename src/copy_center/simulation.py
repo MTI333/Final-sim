@@ -134,12 +134,10 @@ class Simulation:
         """
         self._change_copier_state(copier, CopierState.MAINTENANCE)
         copier.current_client = None
+        end_time = self.clock + self.config.maintenance_duration
+        copier.maintenance_end_time = end_time
         self._schedule(
-            Event(
-                time=self.clock + self.config.maintenance_duration,
-                type=EventType.MAINTENANCE_END,
-                copier_id=copier.id,
-            )
+            Event(time=end_time, type=EventType.MAINTENANCE_END, copier_id=copier.id)
         )
         if corrective:
             self.corrective_maintenance_count += 1
@@ -167,9 +165,9 @@ class Simulation:
         self._change_copier_state(copier, CopierState.BUSY)
         copier.current_client = client
         draw = self._draw_exponential("atencion", self.config.mean_service_time)
-        self._schedule(
-            Event(time=self.clock + draw.value, type=EventType.SERVICE_END, copier_id=copier.id)
-        )
+        end_time = self.clock + draw.value
+        copier.service_end_time = end_time
+        self._schedule(Event(time=end_time, type=EventType.SERVICE_END, copier_id=copier.id))
 
     def _process_arrival(self, event: Event) -> None:
         self._schedule_next_arrival()
@@ -191,6 +189,7 @@ class Simulation:
 
         service_duration = self.clock - finished_client.service_start_time
         copier.current_client = None
+        copier.service_end_time = None
         self.clients_served += 1
         copier.consume_usage(service_duration)
 
@@ -215,6 +214,7 @@ class Simulation:
         draw = self._draw_uniform_threshold(copier.id)
         copier.usage_threshold = draw.value
         copier.usage_remaining = draw.value
+        copier.maintenance_end_time = None
 
         if self.queue:
             next_client = self.queue.popleft()
@@ -232,13 +232,16 @@ class Simulation:
             usage_remaining=copier.usage_remaining,
             usage_threshold=copier.usage_threshold,
             client_id=copier.current_client.id if copier.current_client else None,
+            service_end_time=copier.service_end_time,
+            maintenance_end_time=copier.maintenance_end_time,
         )
 
-    def _record_state_row(self, event_type: str) -> None:
+    def _record_state_row(self, event_type: str, copier_id: int | None = None) -> None:
         row = StateRow(
             iteration=self.iteration,
             clock=self.clock,
             event_type=event_type,
+            copier_id=copier_id,
             llegada=self._current_draws.get("llegada"),
             atencion=self._current_draws.get("atencion"),
             umbral=list(self._current_umbral_draws),
@@ -316,6 +319,6 @@ class Simulation:
             self.clock = event.time
             self.iteration += 1
             self._process_event(event)
-            self._record_state_row(event.type.name)
+            self._record_state_row(event.type.name, event.copier_id)
 
         self._finalize_copier_time_accounting()

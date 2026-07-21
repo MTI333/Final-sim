@@ -51,6 +51,11 @@ class Copier:
     state_since: float = 0.0
     busy_time: float = 0.0
     maintenance_time: float = 0.0
+    # Reloj absoluto en que termina la atención/mantenimiento en curso (o
+    # `None` si no aplica). Se exponen en el vector de estado como
+    # "Fin aten"/"Fin mant" por copiadora (formato VectorEstado_CentroCopiado).
+    service_end_time: float | None = None
+    maintenance_end_time: float | None = None
 
     def is_free(self) -> bool:
         return self.state is CopierState.FREE

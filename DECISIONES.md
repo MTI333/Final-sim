@@ -167,6 +167,27 @@ gestionado. Ver `README.md` para el comando exacto.
 **Alternativa descartada:** `pyproject.toml` + `pip install -e .` con un entry point — más "prolijo"
 pero agrega una capa de configuración de packaging que nadie más va a reusar.
 
+### D17. Vector de estado reorganizado en grupos autocontenidos por copiadora, siguiendo la planilla de referencia de la cátedra
+**Decisión:** cada copiadora es un grupo de 5 columnas (`Estado`, `AcOcup`, `Umbral`, `FinAten`,
+`FinMant`) en vez de las 3 anteriores (`Estado`, `UsoRest`, `Cliente`). `AcOcup` es el complemento
+de lo que ya se trackeaba (`usage_threshold - usage_remaining`); `FinAten`/`FinMant` son nuevos —
+el reloj absoluto en que termina la atención/mantenimiento en curso de esa copiadora
+(`Copier.service_end_time`/`maintenance_end_time`, calculados en el mismo punto donde el motor ya
+programa esos eventos). Se quitó el id de cliente por copiadora de la tabla principal. Los
+eventos `SERVICE_END`/`MAINTENANCE_END` muestran la copiadora en la propia etiqueta (`FinAtC1`,
+`FinMantC2`) en vez de un nombre genérico. Las copiadoras se numeran 1-indexadas solo para
+mostrar (`Cop1`/`Cop2`/`Cop3`, "Copiadora 1/2/3"); el `id` interno sigue 0-indexado.
+**Justificación:** `VectorEstado_CentroCopiado.xlsx` (planilla de referencia que el usuario
+compartió) usa exactamente esta estructura. `FinAten`/`FinMant` son más informativos para
+auditar en la defensa que un simple id de cliente (permiten verificar a ojo cuándo se va a
+disparar el próximo evento de esa copiadora sin tener que buscarlo en la lista de eventos
+programados).
+**Alternativa descartada:** mantener el id de cliente por copiadora además de las columnas
+nuevas — hubiera sido redundante con la sección de clientes de la referencia (ver pendiente en
+`PROGRESO.md`) y alejaba la tabla del formato pedido.
+**Ver también:** SUPUESTOS.md (sin cambios), D5/D12 (siguen aplicando para la cola en la corrida
+real de entrega — no se enumeran clientes ahí, solo longitud).
+
 ---
 
-*Última actualización: 2026-07-17 — Etapa 7 (cierre).*
+*Última actualización: 2026-07-21 — D17 (reestructuración del vector de estado).*

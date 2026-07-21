@@ -14,10 +14,8 @@ from copy_center.state_vector import StateRow
 from copy_center.statistics import SimulationSummary
 
 _EVENT_LABELS_ES = {
-    "INIT": "INICIO",
-    "ARRIVAL": "LLEGADA",
-    "SERVICE_END": "FIN_ATENCION",
-    "MAINTENANCE_END": "FIN_MANTENIMIENTO",
+    "INIT": "Inicializacion",
+    "ARRIVAL": "Llegada",
 }
 
 _STATE_LABELS_ES = {
@@ -27,9 +25,18 @@ _STATE_LABELS_ES = {
 }
 
 
-def event_label(event_type: str) -> str:
+def event_label(event_type: str, copier_id: int | None = None) -> str:
     """Traducción del `event_type` interno (inglés) al español para mostrar.
-    Pública porque también la usa `webapp.py` (DECISIONES.md D13)."""
+
+    SERVICE_END/MAINTENANCE_END incluyen la copiadora involucrada en la
+    propia etiqueta (p. ej. "FinAtC1"), 1-indexada para mostrar (formato
+    VectorEstado_CentroCopiado, "COPIADORA 1/2/3"; DECISIONES.md D8 mapea el
+    resto de los términos). Pública porque también la usa `webapp.py`
+    (DECISIONES.md D13)."""
+    if event_type == "SERVICE_END" and copier_id is not None:
+        return f"FinAtC{copier_id + 1}"
+    if event_type == "MAINTENANCE_END" and copier_id is not None:
+        return f"FinMantC{copier_id + 1}"
     return _EVENT_LABELS_ES.get(event_type, event_type)
 
 
@@ -39,34 +46,46 @@ def state_label(state: str) -> str:
 
 
 def format_header(n_copiers: int) -> str:
-    cols = ["Iter", "Reloj", "Evento", "RND_lleg", "T_lleg", "RND_atenc", "T_atenc",
-            "RND_umbral", "T_umbral"]
+    """Dos líneas: grupo (como las cabeceras combinadas de
+    `VectorEstado_CentroCopiado.xlsx`) y columna. Las primeras 25 columnas
+    (hasta "Cola max") replican nombre y orden exactos de esa planilla de
+    referencia; las últimas 4 ("RND_umbral", "Atendidos", "Correctivos",
+    "Preventivos") no están en la planilla pero son "columnas de apoyo"
+    exigidas por DISEÑO.md §9/§10 — se agregan al final, sin group label,
+    para no romper el orden de lo que sí replica la referencia."""
+    group = ["", "", "", "LLEGADA CLIENTE", "", "", "FIN ATENCION (sorteo)", ""]
     for i in range(n_copiers):
-        cols += [f"Cop{i}_Estado", f"Cop{i}_UsoRest", f"Cop{i}_Cliente"]
-    cols += ["Cola", "ColaMax", "Atendidos", "Correctivos", "Preventivos"]
-    return " | ".join(cols)
+        group += [f"COPIADORA {i + 1}", "", "", "", ""]
+    group += ["COLA", "", "", "", "", ""]
+
+    cols = ["No", "Evento", "Reloj", "RND", "t e/lleg", "prox lleg", "RND", "t aten"]
+    for _ in range(n_copiers):
+        cols += ["Estado", "AC Ocup", "Umbral", "Fin aten", "Fin mant"]
+    cols += ["Cola", "Cola max", "RND_umbral", "Atendidos", "Correctivos", "Preventivos"]
+    return " | ".join(group) + "\n" + " | ".join(cols)
 
 
-def format_row(row: StateRow, *, show_clients: bool = True) -> str:
+def format_row(row: StateRow) -> str:
     rnd_lleg = f"{row.llegada.rnd:.4f}" if row.llegada else "-"
     t_lleg = f"{row.llegada.value:.2f}" if row.llegada else "-"
+    prox_lleg = f"{row.clock + row.llegada.value:.2f}" if row.llegada else "-"
     rnd_at = f"{row.atencion.rnd:.4f}" if row.atencion else "-"
     t_at = f"{row.atencion.value:.2f}" if row.atencion else "-"
-    if row.umbral:
-        rnd_umb = ",".join(f"{draw.rnd:.4f}" for _, draw in row.umbral)
-        t_umb = ",".join(f"{draw.value:.2f}" for _, draw in row.umbral)
-    else:
-        rnd_umb = t_umb = "-"
+    rnd_umb = ",".join(f"{draw.rnd:.4f}" for _, draw in row.umbral) if row.umbral else "-"
 
-    fields = [str(row.iteration), f"{row.clock:.2f}", event_label(row.event_type),
-              rnd_lleg, t_lleg, rnd_at, t_at, rnd_umb, t_umb]
+    fields = [str(row.iteration), event_label(row.event_type, row.copier_id),
+              f"{row.clock:.2f}", rnd_lleg, t_lleg, prox_lleg, rnd_at, t_at]
 
     for c in row.copiers:
-        client_field = str(c.client_id) if (show_clients and c.client_id is not None) else "-"
-        fields += [state_label(c.state), f"{c.usage_remaining:.1f}", client_field]
+        ac_ocup = c.usage_threshold - c.usage_remaining
+        fin_aten = f"{c.service_end_time:.2f}" if c.service_end_time is not None else "-"
+        fin_mant = f"{c.maintenance_end_time:.2f}" if c.maintenance_end_time is not None else "-"
+        fields += [state_label(c.state), f"{ac_ocup:.1f}", f"{c.usage_threshold:.1f}",
+                   fin_aten, fin_mant]
 
-    fields += [str(row.queue_length), str(row.max_queue_length), str(row.clients_served),
-               str(row.corrective_maintenance_count), str(row.preventive_maintenance_count)]
+    fields += [str(row.queue_length), str(row.max_queue_length), rnd_umb,
+               str(row.clients_served), str(row.corrective_maintenance_count),
+               str(row.preventive_maintenance_count)]
     return " | ".join(fields)
 
 
@@ -100,7 +119,7 @@ def render_full_report(state_vector: list[StateRow], n_copiers: int, j: int, i: 
     lines.append("")
     lines.append(f"Última fila (iteración {last.iteration}, reloj={last.clock:.2f} min):")
     lines.append(format_header(n_copiers))
-    lines.append(format_row(last, show_clients=False))
+    lines.append(format_row(last))
     return "\n".join(lines)
 
 
@@ -126,7 +145,7 @@ def format_summary(summary: SimulationSummary) -> str:
     lines.append("  Por copiadora (% del tiempo total simulado):")
     for c in summary.copiers:
         lines.append(
-            f"    Copiadora {c.id}: ocupada {c.occupancy_pct:6.1%}  "
+            f"    Copiadora {c.id + 1}: ocupada {c.occupancy_pct:6.1%}  "
             f"mantenimiento {c.maintenance_pct:6.1%}  libre {c.free_pct:6.1%}"
         )
     return "\n".join(lines)

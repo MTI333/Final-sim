@@ -250,7 +250,7 @@ def render_summary(summary: SimulationSummary, config: SimulationConfig, *,
     cards = "".join(card_html)
 
     copier_rows = "\n".join(
-        f"<tr><td>Copiadora {c.id}</td>"
+        f"<tr><td>Copiadora {c.id + 1}</td>"
         f'<td><span class="bar">'
         f'<span class="bar-busy" style="width:{c.occupancy_pct * 100:.1f}%"></span>'
         f'<span class="bar-maint" style="width:{c.maintenance_pct * 100:.1f}%"></span>'
@@ -458,46 +458,64 @@ def render_pagination(config: SimulationConfig, total_rows: int) -> str:
 
 
 def render_table(rows: list[StateRow], n_copiers: int, *, title: str,
-                  hide_clients: bool = False, highlight_iteration: int | None = None) -> str:
-    headers = ["Iter", "Reloj", "Evento", "RND lleg", "T lleg", "RND atenc", "T atenc",
-               "RND umbral", "T umbral"]
+                  highlight_iteration: int | None = None) -> str:
+    """Cabecera de dos filas (grupo + columna), igual que las cabeceras
+    combinadas de `VectorEstado_CentroCopiado.xlsx`: las primeras 8 + 5*n
+    + 2 columnas (hasta "Cola max") replican esa planilla nombre a nombre y
+    en el mismo orden; "RND_umbral/Atendidos/Correctivos/Preventivos" se
+    agregan sin group label al final — no están en la planilla pero son
+    columnas de apoyo exigidas por DISEÑO.md §9/§10 (ver report.py)."""
+    group_cells = [
+        '<th colspan="3"></th>',
+        '<th colspan="3">LLEGADA CLIENTE</th>',
+        '<th colspan="2">FIN ATENCION (sorteo)</th>',
+    ]
     for i in range(n_copiers):
-        headers += [f"Cop{i} Estado", f"Cop{i} Uso", f"Cop{i} Cliente"]
-    headers += ["Cola", "ColaMáx", "Atendidos", "Correctivos", "Preventivos"]
+        group_cells.append(f'<th colspan="5">COPIADORA {i + 1}</th>')
+    group_cells.append('<th colspan="2">COLA</th>')
+    group_cells.append('<th colspan="4"></th>')
+    group_html = "".join(group_cells)
+
+    headers = ["No", "Evento", "Reloj", "RND", "t e/lleg", "prox lleg", "RND", "t aten"]
+    for i in range(n_copiers):
+        headers += ["Estado", "AC Ocup", "Umbral", "Fin aten", "Fin mant"]
+    headers += ["Cola", "Cola max", "RND_umbral", "Atendidos", "Correctivos", "Preventivos"]
     header_html = "".join(f"<th>{h}</th>" for h in headers)
 
     body_rows = []
     for row in rows:
         rnd_lleg = f"{row.llegada.rnd:.4f}" if row.llegada else "-"
         t_lleg = f"{row.llegada.value:.2f}" if row.llegada else "-"
+        prox_lleg = f"{row.clock + row.llegada.value:.2f}" if row.llegada else "-"
         rnd_at = f"{row.atencion.rnd:.4f}" if row.atencion else "-"
         t_at = f"{row.atencion.value:.2f}" if row.atencion else "-"
-        if row.umbral:
-            rnd_umb = ",".join(f"{d.rnd:.4f}" for _, d in row.umbral)
-            t_umb = ",".join(f"{d.value:.2f}" for _, d in row.umbral)
-        else:
-            rnd_umb = t_umb = "-"
+        rnd_umb = ",".join(f"{d.rnd:.4f}" for _, d in row.umbral) if row.umbral else "-"
 
         tds = [
-            f"<td>{row.iteration}</td>", f"<td>{row.clock:.2f}</td>",
-            f"<td>{event_label(row.event_type)}</td>",
-            f"<td>{rnd_lleg}</td>", f"<td>{t_lleg}</td>",
+            f"<td>{row.iteration}</td>",
+            f"<td>{event_label(row.event_type, row.copier_id)}</td>",
+            f"<td>{row.clock:.2f}</td>",
+            f"<td>{rnd_lleg}</td>", f"<td>{t_lleg}</td>", f"<td>{prox_lleg}</td>",
             f"<td>{rnd_at}</td>", f"<td>{t_at}</td>",
-            f"<td>{rnd_umb}</td>", f"<td>{t_umb}</td>",
         ]
         for c in row.copiers:
-            client_field = str(c.client_id) if (not hide_clients and c.client_id is not None) \
+            ac_ocup = c.usage_threshold - c.usage_remaining
+            fin_aten = f"{c.service_end_time:.2f}" if c.service_end_time is not None else "-"
+            fin_mant = f"{c.maintenance_end_time:.2f}" if c.maintenance_end_time is not None \
                 else "-"
             tds.append(
                 f'<td><span class="state state-{c.state.lower()}">{state_label(c.state)}'
                 f"</span></td>"
             )
-            tds.append(f"<td>{c.usage_remaining:.1f}</td>")
-            tds.append(f"<td>{client_field}</td>")
+            tds.append(f"<td>{ac_ocup:.1f}</td>")
+            tds.append(f"<td>{c.usage_threshold:.1f}</td>")
+            tds.append(f"<td>{fin_aten}</td>")
+            tds.append(f"<td>{fin_mant}</td>")
         is_max_row = row.iteration == highlight_iteration
         cola_badge = ' <span class="badge-max">◆ máx</span>' if is_max_row else ""
         tds += [
             f"<td>{row.queue_length}{cola_badge}</td>", f"<td>{row.max_queue_length}</td>",
+            f"<td>{rnd_umb}</td>",
             f"<td>{row.clients_served}</td>", f"<td>{row.corrective_maintenance_count}</td>",
             f"<td>{row.preventive_maintenance_count}</td>",
         ]
@@ -512,7 +530,7 @@ def render_table(rows: list[StateRow], n_copiers: int, *, title: str,
   <h2>{html.escape(title)}</h2>
   <div class="table-scroll">
     <table class="state-table">
-      <thead><tr>{header_html}</tr></thead>
+      <thead><tr>{group_html}</tr><tr>{header_html}</tr></thead>
       <tbody>{body_html}</tbody>
     </table>
   </div>
@@ -562,7 +580,7 @@ def render_page(config: SimulationConfig, sim: Simulation) -> str:
 {render_pagination(config, total_rows)}
 {render_table(window, config.n_copiers, title=window_title, highlight_iteration=max_iteration)}
 {render_table([last], config.n_copiers, title="Última fila (sin objetos temporales)",
-               hide_clients=True, highlight_iteration=max_iteration)}
+               highlight_iteration=max_iteration)}
 <footer>Cada carga de página corre la simulación completa desde el principio con los
 parámetros del formulario (no hay estado guardado entre requests) — DECISIONES.md.</footer>
 </body>
