@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from copy_center.config import SimulationConfig
-from copy_center.report import event_label, state_label
+from copy_center.report import ClientSlotMap, compute_client_slots, event_label, state_label
 from copy_center.simulation import Simulation
 from copy_center.state_vector import StateRow
 from copy_center.statistics import SimulationSummary
@@ -63,6 +63,8 @@ section, form.params { background: #fff; border: 1px solid #e2e2e5; border-radiu
   gap: 4px; }
 .params-grid input { font-size: 13px; padding: 6px 8px; border: 1px solid #d0d0d5;
   border-radius: 6px; font-family: inherit; }
+.checkbox-field { display: flex; align-items: baseline; gap: 6px; font-size: 12px;
+  color: #3a3a3c; margin-top: 12px; }
 form.params button { margin-top: 14px; background: #2f5fdb; color: #fff; border: none;
   padding: 9px 18px; border-radius: 6px; font-size: 13px; cursor: pointer; }
 form.params button:hover { background: #274ec0; }
@@ -156,6 +158,13 @@ def _query_string(config: SimulationConfig, **overrides: object) -> str:
     return urlencode(clean)
 
 
+def _show_clients_param(show_clients: bool) -> dict[str, str]:
+    """`show_clients` no es un campo de `SimulationConfig` (ver render_table),
+    así que no vive en `_FIELDS`/`_query_string` — este helper es el único
+    punto para propagarlo en los links de paginación/salto de card."""
+    return {"show_clients": "on"} if show_clients else {}
+
+
 def _nice_axis_max(raw_max: float, *, steps: int = 4) -> tuple[float, list[float]]:
     """Redondea `raw_max` al múltiplo 'lindo' (1/2/2.5/5 · 10^n) más chico que lo
     cubre y devuelve (tope, ticks de 0 al tope en `steps` pasos iguales)."""
@@ -192,7 +201,7 @@ def _downsample_for_chart(rows: list[StateRow], max_points: int = 400) -> list[S
     return [picked[k] for k in sorted(picked)]
 
 
-def render_form(config: SimulationConfig) -> str:
+def render_form(config: SimulationConfig, *, show_clients: bool = False) -> str:
     inputs = []
     for name, label, kind in _FIELDS:
         value = getattr(config, name)
@@ -202,18 +211,23 @@ def render_form(config: SimulationConfig) -> str:
             f'<label>{html.escape(label)}'
             f'<input type="number"{step} name="{name}" value="{html.escape(value_str)}"></label>'
         )
+    checked = " checked" if show_clients else ""
     return f"""
 <form class="params" method="get" action="/">
   <div class="params-grid">
     {"".join(inputs)}
   </div>
+  <label class="checkbox-field"><input type="checkbox" name="show_clients"{checked}>
+    Mostrar objetos de cliente (CLIENTE 1..5, formato VectorEstado_CentroCopiado — solo para
+    corridas chicas de demo, DECISIONES.md D18)</label>
   <button type="submit">Ejecutar simulación</button>
 </form>
 """
 
 
 def render_summary(summary: SimulationSummary, config: SimulationConfig, *,
-                    max_iteration: int | None, total_rows: int) -> str:
+                    max_iteration: int | None, total_rows: int,
+                    show_clients: bool = False) -> str:
     if summary.avg_wait_time is not None:
         wait = f"{summary.avg_wait_time:.2f} min ({summary.clients_that_waited} esperaron)"
     else:
@@ -242,7 +256,8 @@ def render_summary(summary: SimulationSummary, config: SimulationConfig, *,
                 jump_iteration - config.report_row_count // 2,
                 max(0, total_rows - config.report_row_count),
             ))
-            qs = _query_string(config, report_from_iteration=jump_from)
+            qs = _query_string(config, report_from_iteration=jump_from,
+                                **_show_clients_param(show_clients))
             card_html.append(
                 f'<a class="card card-link" href="/?{qs}" '
                 f'title="Ir a la fila donde se alcanzó">{inner}</a>'
@@ -431,23 +446,25 @@ def render_queue_chart(state_vector: list[StateRow], summary: SimulationSummary,
 """
 
 
-def render_pagination(config: SimulationConfig, total_rows: int) -> str:
+def render_pagination(config: SimulationConfig, total_rows: int, *,
+                       show_clients: bool = False) -> str:
     prev_from = max(0, config.report_from_iteration - config.report_row_count)
     next_from = config.report_from_iteration + config.report_row_count
     has_prev = config.report_from_iteration > 0
     has_next = next_from < total_rows
+    extra = _show_clients_param(show_clients)
 
     if has_prev:
-        prev_qs = _query_string(config, report_from_iteration=prev_from)
+        prev_qs = _query_string(config, report_from_iteration=prev_from, **extra)
         prev_link = f'<a class="page-link" href="/?{prev_qs}">« Iteraciones anteriores</a>'
     else:
         prev_link = '<span class="page-link disabled">« Iteraciones anteriores</span>'
 
     if has_next:
-        next_qs = _query_string(config, report_from_iteration=next_from)
+        next_qs = _query_string(config, report_from_iteration=next_from, **extra)
         next_link = f'<a class="page-link" href="/?{next_qs}">Iteraciones siguientes »</a>'
         last_qs = _query_string(
-            config, report_from_iteration=max(0, total_rows - config.report_row_count)
+            config, report_from_iteration=max(0, total_rows - config.report_row_count), **extra
         )
         last_link = f'<a class="page-link" href="/?{last_qs}">Ir al final »»</a>'
     else:
@@ -458,13 +475,19 @@ def render_pagination(config: SimulationConfig, total_rows: int) -> str:
 
 
 def render_table(rows: list[StateRow], n_copiers: int, *, title: str,
-                  highlight_iteration: int | None = None) -> str:
+                  highlight_iteration: int | None = None,
+                  client_slots: list[ClientSlotMap] | None = None,
+                  max_client_slots: int = 5) -> str:
     """Cabecera de dos filas (grupo + columna), igual que las cabeceras
     combinadas de `VectorEstado_CentroCopiado.xlsx`: las primeras 8 + 5*n
     + 2 columnas (hasta "Cola max") replican esa planilla nombre a nombre y
     en el mismo orden; "RND_umbral/Atendidos/Correctivos/Preventivos" se
     agregan sin group label al final — no están en la planilla pero son
-    columnas de apoyo exigidas por DISEÑO.md §9/§10 (ver report.py)."""
+    columnas de apoyo exigidas por DISEÑO.md §9/§10 (ver report.py).
+
+    `client_slots` (uno por fila de `rows`, de `report.compute_client_slots`)
+    agrega la sección "CLIENTE 1..N" — solo para la vista de demo
+    (DECISIONES.md D18), no para la tabla estándar del entregable."""
     group_cells = [
         '<th colspan="3"></th>',
         '<th colspan="3">LLEGADA CLIENTE</th>',
@@ -474,16 +497,22 @@ def render_table(rows: list[StateRow], n_copiers: int, *, title: str,
         group_cells.append(f'<th colspan="5">COPIADORA {i + 1}</th>')
     group_cells.append('<th colspan="2">COLA</th>')
     group_cells.append('<th colspan="4"></th>')
-    group_html = "".join(group_cells)
 
     headers = ["No", "Evento", "Reloj", "RND", "t e/lleg", "prox lleg", "RND", "t aten"]
     for i in range(n_copiers):
         headers += ["Estado", "AC Ocup", "Umbral", "Fin aten", "Fin mant"]
     headers += ["Cola", "Cola max", "RND_umbral", "Atendidos", "Correctivos", "Preventivos"]
+
+    if client_slots is not None:
+        for i in range(max_client_slots):
+            group_cells.append(f'<th colspan="2">CLIENTE {i + 1}</th>')
+            headers += ["Estado", "H.lleg"]
+
+    group_html = "".join(group_cells)
     header_html = "".join(f"<th>{h}</th>" for h in headers)
 
     body_rows = []
-    for row in rows:
+    for row_idx, row in enumerate(rows):
         rnd_lleg = f"{row.llegada.rnd:.4f}" if row.llegada else "-"
         t_lleg = f"{row.llegada.value:.2f}" if row.llegada else "-"
         prox_lleg = f"{row.clock + row.llegada.value:.2f}" if row.llegada else "-"
@@ -519,6 +548,14 @@ def render_table(rows: list[StateRow], n_copiers: int, *, title: str,
             f"<td>{row.clients_served}</td>", f"<td>{row.corrective_maintenance_count}</td>",
             f"<td>{row.preventive_maintenance_count}</td>",
         ]
+        if client_slots is not None:
+            slots = client_slots[row_idx]
+            for slot in range(1, max_client_slots + 1):
+                if slot in slots:
+                    _client_id, status, arrival = slots[slot]
+                    tds += [f"<td>{status}</td>", f"<td>{arrival:.2f}</td>"]
+                else:
+                    tds += ["<td>-</td>", "<td>-</td>"]
         row_class = ' class="row-max-queue"' if is_max_row else ""
         body_rows.append(f"<tr{row_class}>{''.join(tds)}</tr>")
 
@@ -538,7 +575,8 @@ def render_table(rows: list[StateRow], n_copiers: int, *, title: str,
 """
 
 
-def render_page(config: SimulationConfig, sim: Simulation) -> str:
+def render_page(config: SimulationConfig, sim: Simulation, *, show_clients: bool = False,
+                 max_client_slots: int = 5) -> str:
     summary = sim.summary()
     total_rows = len(sim.state_vector)
     j = max(0, min(config.report_from_iteration, max(0, total_rows - 1)))
@@ -560,6 +598,14 @@ def render_page(config: SimulationConfig, sim: Simulation) -> str:
         f"(iteración final={last.iteration}, reloj final={last.clock:.2f} min)"
     )
 
+    window_slots = last_slots = None
+    last_title = "Última fila (sin objetos temporales)"
+    if show_clients:
+        slots_by_row = compute_client_slots(sim.state_vector, max_client_slots)
+        window_slots = slots_by_row[j: j + len(window)]
+        last_slots = [slots_by_row[-1]]
+        last_title = "Última fila"
+
     return f"""<!doctype html>
 <html lang="es">
 <head>
@@ -574,13 +620,15 @@ def render_page(config: SimulationConfig, sim: Simulation) -> str:
   <p class="subtitle">Simulación de eventos discretos — interfaz de exploración (no forma parte
   del entregable del TP, ver README.md)</p>
 </header>
-{render_form(config)}
-{render_summary(summary, config, max_iteration=max_iteration, total_rows=total_rows)}
+{render_form(config, show_clients=show_clients)}
+{render_summary(summary, config, max_iteration=max_iteration, total_rows=total_rows,
+                 show_clients=show_clients)}
 {render_queue_chart(sim.state_vector, summary, max_iteration)}
-{render_pagination(config, total_rows)}
-{render_table(window, config.n_copiers, title=window_title, highlight_iteration=max_iteration)}
-{render_table([last], config.n_copiers, title="Última fila (sin objetos temporales)",
-               highlight_iteration=max_iteration)}
+{render_pagination(config, total_rows, show_clients=show_clients)}
+{render_table(window, config.n_copiers, title=window_title, highlight_iteration=max_iteration,
+              client_slots=window_slots, max_client_slots=max_client_slots)}
+{render_table([last], config.n_copiers, title=last_title, highlight_iteration=max_iteration,
+              client_slots=last_slots, max_client_slots=max_client_slots)}
 <footer>Cada carga de página corre la simulación completa desde el principio con los
 parámetros del formulario (no hay estado guardado entre requests) — DECISIONES.md.</footer>
 </body>
@@ -621,6 +669,7 @@ class _Handler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         if not query:
             query = {"max_iterations": [str(_LANDING_MAX_ITERATIONS)]}
+        show_clients = query.get("show_clients", [""])[0] not in ("", "0", "off")
         try:
             config = _config_from_query(query)
         except (ValueError, TypeError) as exc:
@@ -634,7 +683,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._respond(500, render_error_page(config, exc))
             return
 
-        self._respond(200, render_page(config, sim))
+        self._respond(200, render_page(config, sim, show_clients=show_clients))
 
     def _respond(self, status: int, body: str) -> None:
         encoded = body.encode("utf-8")

@@ -649,3 +649,27 @@ El usuario pidió explícitamente que el vector de estado respete **nombre y ord
   `VectorEstado_CentroCopiado.xlsx` en estructura (aunque los RND no coinciden número a número —
   la planilla usa valores "lindos" a mano, no una semilla de `random.Random`). Snapshot de la
   webapp real publicado como Artifact para que el usuario lo revise visualmente.
+
+### Hecho (cont.) — sección "CLIENTE 1..N" (objetos de cliente), vista opt-in de demo
+Implementada la parte que había quedado pendiente: registro de clientes vivos (en atención/en
+cola) con asignación de slot persistente, como en la planilla de referencia (DECISIONES.md D18).
+- `report.compute_client_slots(state_vector, max_client_slots=5)`: calcula, para cada fila, qué
+  cliente ocupa cada slot 1..N — un cliente conserva su slot hasta irse (verificado a mano contra
+  una corrida chica, semilla 42: el cliente que pasa de "En cola" a "En atención" al liberarse su
+  copiadora mantiene el mismo número de slot).
+- CLI: flag `--show-clients [N]` (default 5 si se pasa sin valor), usa
+  `render_full_report_with_clients` — nueva, no reemplaza `render_full_report` (D5/D12 siguen
+  intactos para la tabla estándar).
+- Webapp: checkbox "Mostrar objetos de cliente" en el formulario (`show_clients` en la query
+  string, propagado por paginación y por el link de la card "Cola máxima" vía
+  `_show_clients_param`, ya que no es un campo de `SimulationConfig`/`_FIELDS`).
+- **Fricción encontrada:** el servidor de background seguía corriendo con el código de antes de
+  este cambio (mismo problema que ya había pasado una vez esta sesión — Python no recarga
+  módulos). Hubo que matarlo y levantar uno nuevo antes de poder verificar en vivo; `pkill`
+  devolvió un exit code raro (144) en este entorno sandboxeado — terminó funcionando con
+  `ps aux | grep` + arrancar el proceso nuevo directamente, sin necesidad de matar el viejo a mano
+  (ya no estaba corriendo). Vale la pena recordar: reiniciar el server después de cualquier cambio
+  de código, no asumir que un `curl` a un server ya corriendo refleja el código actual.
+- Validado: compilación limpia, comparación campo a campo CLI vs. webapp para la misma
+  semilla/parámetros (coinciden), y contra el servidor real reiniciado (`curl` con
+  `show_clients=on`). Snapshot publicado como Artifact.

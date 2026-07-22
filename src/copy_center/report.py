@@ -45,14 +45,12 @@ def state_label(state: str) -> str:
     return _STATE_LABELS_ES.get(state, state)
 
 
-def format_header(n_copiers: int) -> str:
-    """Dos líneas: grupo (como las cabeceras combinadas de
-    `VectorEstado_CentroCopiado.xlsx`) y columna. Las primeras 25 columnas
-    (hasta "Cola max") replican nombre y orden exactos de esa planilla de
-    referencia; las últimas 4 ("RND_umbral", "Atendidos", "Correctivos",
-    "Preventivos") no están en la planilla pero son "columnas de apoyo"
-    exigidas por DISEÑO.md §9/§10 — se agregan al final, sin group label,
-    para no romper el orden de lo que sí replica la referencia."""
+_DEFAULT_CLIENT_SLOTS = 5
+
+
+def _core_group_and_columns(n_copiers: int) -> tuple[list[str], list[str]]:
+    """Grupo + columna "núcleo" (hasta "Preventivos"), compartido por la
+    tabla estándar y la variante con clientes — ver `format_header`."""
     group = ["", "", "", "LLEGADA CLIENTE", "", "", "FIN ATENCION (sorteo)", ""]
     for i in range(n_copiers):
         group += [f"COPIADORA {i + 1}", "", "", "", ""]
@@ -62,10 +60,37 @@ def format_header(n_copiers: int) -> str:
     for _ in range(n_copiers):
         cols += ["Estado", "AC Ocup", "Umbral", "Fin aten", "Fin mant"]
     cols += ["Cola", "Cola max", "RND_umbral", "Atendidos", "Correctivos", "Preventivos"]
+    return group, cols
+
+
+def format_header(n_copiers: int) -> str:
+    """Dos líneas: grupo (como las cabeceras combinadas de
+    `VectorEstado_CentroCopiado.xlsx`) y columna. Las primeras 25 columnas
+    (hasta "Cola max") replican nombre y orden exactos de esa planilla de
+    referencia; las últimas 4 ("RND_umbral", "Atendidos", "Correctivos",
+    "Preventivos") no están en la planilla pero son "columnas de apoyo"
+    exigidas por DISEÑO.md §9/§10 — se agregan al final, sin group label,
+    para no romper el orden de lo que sí replica la referencia."""
+    group, cols = _core_group_and_columns(n_copiers)
     return " | ".join(group) + "\n" + " | ".join(cols)
 
 
-def format_row(row: StateRow) -> str:
+def format_header_with_clients(n_copiers: int, max_client_slots: int = _DEFAULT_CLIENT_SLOTS,
+                                ) -> str:
+    """Variante de `format_header` con la sección "CLIENTE 1..N" de la
+    planilla de referencia agregada al final (Estado + H.lleg por slot).
+
+    Solo para corridas chicas de demo (DECISIONES.md D18): con `max_queue_length`
+    grande no alcanzan `max_client_slots` columnas fijas — la tabla estándar
+    (D5/D12, sin enumerar clientes) sigue siendo la del entregable real."""
+    group, cols = _core_group_and_columns(n_copiers)
+    for i in range(max_client_slots):
+        group += [f"CLIENTE {i + 1}", ""]
+        cols += ["Estado", "H.lleg"]
+    return " | ".join(group) + "\n" + " | ".join(cols)
+
+
+def _core_fields(row: StateRow) -> list[str]:
     rnd_lleg = f"{row.llegada.rnd:.4f}" if row.llegada else "-"
     t_lleg = f"{row.llegada.value:.2f}" if row.llegada else "-"
     prox_lleg = f"{row.clock + row.llegada.value:.2f}" if row.llegada else "-"
@@ -86,6 +111,77 @@ def format_row(row: StateRow) -> str:
     fields += [str(row.queue_length), str(row.max_queue_length), rnd_umb,
                str(row.clients_served), str(row.corrective_maintenance_count),
                str(row.preventive_maintenance_count)]
+    return fields
+
+
+def format_row(row: StateRow) -> str:
+    return " | ".join(_core_fields(row))
+
+
+# slot (1-indexado) -> (client_id, "En atención"/"En cola", hora de llegada)
+ClientSlotMap = dict[int, tuple[int, str, float]]
+
+
+def compute_client_slots(state_vector: list[StateRow],
+                          max_client_slots: int = _DEFAULT_CLIENT_SLOTS) -> list[ClientSlotMap]:
+    """Asigna a cada cliente vivo (en atención o en cola) un slot 1..N, uno
+    por fila del vector de estado — igual que la sección "CLIENTE 1..N" de
+    `VectorEstado_CentroCopiado.xlsx`: la asignación es persistente (un
+    cliente conserva su slot hasta irse, "el slot se libera al irse", no se
+    reordena de fila a fila) y se calcula enteramente sobre lo que ya
+    registra `StateRow` (`copiers[].client_id`, `clients_in_queue`), sin
+    tocar el motor (DECISIONES.md D13).
+
+    Si en algún momento hay más clientes vivos que `max_client_slots`, los
+    que no entran simplemente no aparecen en ningún slot ese tramo (D18: es
+    una vista de demo con capacidad fija, no el diseño del entregable real,
+    que no tiene ese límite — DECISIONES.md D5/D12)."""
+    client_arrival: dict[int, float] = {}
+    slot_of_client: dict[int, int] = {}
+    free_slots = list(range(1, max_client_slots + 1))
+    per_row: list[ClientSlotMap] = []
+
+    for row in state_vector:
+        alive: dict[int, str] = {}
+        for c in row.copiers:
+            if c.client_id is not None:
+                alive[c.client_id] = "En atención"
+                client_arrival.setdefault(c.client_id, row.clock)
+        for cs in row.clients_in_queue:
+            alive[cs.id] = "En cola"
+            client_arrival.setdefault(cs.id, cs.arrival_time)
+
+        for cid in list(slot_of_client):
+            if cid not in alive:
+                free_slots.append(slot_of_client.pop(cid))
+        free_slots.sort()
+
+        new_clients = sorted(
+            (cid for cid in alive if cid not in slot_of_client),
+            key=lambda cid: client_arrival[cid],
+        )
+        for cid in new_clients:
+            if not free_slots:
+                break
+            slot_of_client[cid] = free_slots.pop(0)
+
+        per_row.append({
+            slot: (cid, alive[cid], client_arrival[cid])
+            for cid, slot in slot_of_client.items()
+        })
+
+    return per_row
+
+
+def format_row_with_clients(row: StateRow, slots: ClientSlotMap,
+                             max_client_slots: int = _DEFAULT_CLIENT_SLOTS) -> str:
+    fields = _core_fields(row)
+    for slot in range(1, max_client_slots + 1):
+        if slot in slots:
+            _client_id, status, arrival = slots[slot]
+            fields += [status, f"{arrival:.2f}"]
+        else:
+            fields += ["-", "-"]
     return " | ".join(fields)
 
 
@@ -120,6 +216,33 @@ def render_full_report(state_vector: list[StateRow], n_copiers: int, j: int, i: 
     lines.append(f"Última fila (iteración {last.iteration}, reloj={last.clock:.2f} min):")
     lines.append(format_header(n_copiers))
     lines.append(format_row(last))
+    return "\n".join(lines)
+
+
+def render_full_report_with_clients(state_vector: list[StateRow], n_copiers: int, j: int, i: int,
+                                     max_client_slots: int = _DEFAULT_CLIENT_SLOTS) -> str:
+    """Igual que `render_full_report`, pero con la sección "CLIENTE 1..N" de
+    la planilla de referencia agregada (`compute_client_slots`). Pensado
+    para corridas chicas de demo (DECISIONES.md D18), no para el entregable
+    real."""
+    window = state_vector[j : j + i]
+    last = state_vector[-1]
+    slots_by_row = compute_client_slots(state_vector, max_client_slots)
+    window_slots = slots_by_row[j : j + i]
+
+    lines = [
+        f"Vector de estado — filas {j} a {j + len(window) - 1} de {len(state_vector) - 1} "
+        f"(iteración final={last.iteration}, reloj final={last.clock:.2f} min)",
+        format_header_with_clients(n_copiers, max_client_slots),
+    ]
+    lines += [
+        format_row_with_clients(r, slots, max_client_slots)
+        for r, slots in zip(window, window_slots)
+    ]
+    lines.append("")
+    lines.append(f"Última fila (iteración {last.iteration}, reloj={last.clock:.2f} min):")
+    lines.append(format_header_with_clients(n_copiers, max_client_slots))
+    lines.append(format_row_with_clients(last, slots_by_row[-1], max_client_slots))
     return "\n".join(lines)
 
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 
 from copy_center.config import SimulationConfig
-from copy_center.report import format_summary, render_full_report
+from copy_center.report import format_summary, render_full_report, render_full_report_with_clients
 from copy_center.simulation import Simulation
 
 
@@ -57,19 +57,35 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=defaults.seed,
                          help=f"Semilla del generador aleatorio, para reproducibilidad "
                               f"(default: {defaults.seed}).")
+    parser.add_argument("--show-clients", type=int, nargs="?", const=5, default=None,
+                         metavar="N",
+                         help="Agrega la sección 'CLIENTE 1..N' (formato "
+                              "VectorEstado_CentroCopiado, DECISIONES.md D18) al vector de "
+                              "estado, con N slots (default 5 si se pasa sin valor). Pensado "
+                              "para corridas chicas de demo — con colas grandes, clientes de "
+                              "más simplemente no aparecen en ningún slot; el entregable real "
+                              "no usa esta vista (default: desactivado).")
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = _build_arg_parser().parse_args(argv)
-    config = SimulationConfig(**vars(args))
+    args = vars(_build_arg_parser().parse_args(argv))
+    show_clients = args.pop("show_clients")
+    config = SimulationConfig(**args)
 
     sim = Simulation(config)
     sim.run()
 
-    print(render_full_report(
-        sim.state_vector, config.n_copiers, config.report_from_iteration, config.report_row_count
-    ))
+    if show_clients is not None:
+        print(render_full_report_with_clients(
+            sim.state_vector, config.n_copiers, config.report_from_iteration,
+            config.report_row_count, max_client_slots=show_clients,
+        ))
+    else:
+        print(render_full_report(
+            sim.state_vector, config.n_copiers, config.report_from_iteration,
+            config.report_row_count,
+        ))
     print()
     print(format_summary(sim.summary()))
 

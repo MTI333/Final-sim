@@ -188,6 +188,25 @@ nuevas — hubiera sido redundante con la sección de clientes de la referencia 
 **Ver también:** SUPUESTOS.md (sin cambios), D5/D12 (siguen aplicando para la cola en la corrida
 real de entrega — no se enumeran clientes ahí, solo longitud).
 
+### D18. Sección "CLIENTE 1..N" (objetos de cliente) como vista opt-in de demo, calculada en la capa de presentación
+**Decisión:** se agrega la sección "CLIENTE 1..N" de `VectorEstado_CentroCopiado.xlsx` (Estado +
+hora de llegada por cliente, con asignación de slot **persistente** — un cliente conserva su slot
+hasta irse, no se reordena de fila a fila) como una vista **separada y opt-in**, no como cambio al
+diseño del entregable real: `report.compute_client_slots` calcula la asignación de slots
+enteramente a partir de lo que ya registra `StateRow` (`copiers[].client_id`,
+`clients_in_queue`), sin tocar `Simulation` (DECISIONES.md D13). En la CLI es el flag
+`--show-clients [N]` (`render_full_report_with_clients`); en la webapp, un checkbox en el
+formulario. Ambas rutas comparten `compute_client_slots`.
+**Justificación:** la planilla de referencia asume una cantidad chica y acotada de clientes vivos
+a la vez (5 slots fijos), pero el motor no tiene ese límite — con SUPUESTOS.md #1 decidido en modo
+literal la cola puede crecer sin techo (D5/D12). Con más clientes vivos que slots, los que no
+entran simplemente no aparecen en ningún slot ese tramo — aceptable porque esta vista es
+explícitamente para corridas chicas de demo, no para la corrida real de entrega, que sigue usando
+la tabla estándar (solo longitud de cola, D5/D12 sin cambios).
+**Alternativa descartada:** agregar los slots directamente a la tabla estándar (siempre visibles)
+— rompería silenciosamente en la corrida real saturada (SUPUESTOS #1), y para corridas chicas
+igual hay que elegir un N arbitrario que no significa nada en el caso general.
+
 ---
 
-*Última actualización: 2026-07-21 — D17 (reestructuración del vector de estado).*
+*Última actualización: 2026-07-21 — D18 (vista opt-in de objetos de cliente).*
