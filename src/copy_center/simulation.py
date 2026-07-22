@@ -34,42 +34,52 @@ from copy_center.statistics import SimulationSummary, copier_stats
 class Simulation:
     def __init__(self, config: SimulationConfig) -> None:
         self.config = config
-        self.rng = RandomGenerator(config.seed)
+        self.rng = RandomGenerator(config.seed)  # Un único generador para toda la corrida
+        # (mismo seed => misma secuencia de RND => corrida 100% reproducible).
 
-        self.clock: float = 0.0
-        self.iteration: int = 0
+        self.clock: float = 0.0  # Reloj de la simulación (minutos simulados, no tiempo real).
+        self.iteration: int = 0  # Contador de eventos procesados = número de fila del vector de estado.
 
+        # Cola de prioridad (heap) de eventos pendientes, ordenada por tiempo.
+        # Cada elemento es (time, seq, event): `seq` es un contador monótono
+        # que desempata eventos con el mismo `time` por orden de llegada al
+        # heap, así Python nunca necesita comparar dos `Event` entre sí
+        # (evitaría un error si `Event` no fuera comparable).
         self._event_heap: list[tuple[float, int, Event]] = []
         self._event_seq = itertools.count()
-        self._next_client_id = itertools.count()
+        self._next_client_id = itertools.count()  # Generador de ids únicos para clientes nuevos.
 
         # RND capturados durante el procesamiento del evento en curso, para
         # poder volcarlos a la StateRow correspondiente (§8 del prompt: "para
         # cada variable aleatoria se muestra el RND usado"). Se resetean en
         # `_record_state_row`.
-        self._current_draws: dict[str, Draw] = {}
-        self._current_umbral_draws: list[tuple[int, Draw]] = []
+        self._current_draws: dict[str, Draw] = {}  # Sorteos "de a uno" (llegada, atención) del evento actual.
+        self._current_umbral_draws: list[tuple[int, Draw]] = []  # Sorteos de umbral, uno por copiadora que se re-sorteó en este evento.
 
         self.copiers: list[Copier] = [self._new_copier(i) for i in range(config.n_copiers)]
-        self.queue: deque[Client] = deque()
+        self.queue: deque[Client] = deque()  # Cola común (FIFO) de clientes esperando copiadora libre.
 
         # Acumuladores estadísticos (DISEÑO.md §10).
-        self.max_queue_length: int = 0
+        self.max_queue_length: int = 0  # El resultado que pide el enunciado.
         self.corrective_maintenance_count: int = 0
         self.preventive_maintenance_count: int = 0
         self.clients_served: int = 0
-        self.total_wait_time: float = 0.0
-        self.clients_that_waited: int = 0
+        self.total_wait_time: float = 0.0  # Suma de esperas, solo de quienes esperaron (`waited`).
+        self.clients_that_waited: int = 0  # Denominador para el promedio de espera.
 
-        self.state_vector: list[StateRow] = []
+        self.state_vector: list[StateRow] = []  # Una fila por cada iteración (evento procesado).
 
-        self._schedule_next_arrival()
+        self._schedule_next_arrival()  # Arranca la cadena de llegadas (la primera de todas).
         if config.end_time is not None:
+            # Evento "centinela" que corta la corrida por tiempo, además del
+            # tope por cantidad de iteraciones (`max_iterations`).
             self._schedule(Event(time=config.end_time, type=EventType.SIMULATION_END))
 
-        self._record_state_row("INIT")
+        self._record_state_row("INIT")  # Fila 0: estado inicial, antes de procesar ningún evento.
 
     def _new_copier(self, copier_id: int) -> Copier:
+        # Al crear cada copiadora se le sortea su primer umbral de uso (igual
+        # que cuando sale de un mantenimiento, ver `_process_maintenance_end`).
         draw = self._draw_uniform_threshold(copier_id)
         return Copier(
             id=copier_id,
@@ -85,11 +95,16 @@ class Simulation:
         heapq.heappush(self._event_heap, (event.time, next(self._event_seq), event))
 
     def _draw_exponential(self, kind: str, mean: float) -> Draw:
+        # `kind` es la clave con la que después se busca este sorteo en
+        # `_record_state_row` ("llegada" o "atencion").
         draw = self.rng.exponential(mean)
         self._current_draws[kind] = draw
         return draw
 
     def _draw_uniform_threshold(self, copier_id: int) -> Draw:
+        # A diferencia de `_draw_exponential`, acá se guarda una LISTA (puede
+        # haber más de un umbral sorteado en el mismo evento: por ejemplo al
+        # arrancar la simulación, se sortean los 3 umbrales iniciales juntos).
         draw = self.rng.uniform(
             self.config.maintenance_threshold_min, self.config.maintenance_threshold_max
         )
@@ -97,20 +112,27 @@ class Simulation:
         return draw
 
     def _schedule_next_arrival(self) -> None:
+        # Se llama una vez al arrancar y después cada vez que se procesa una
+        # Llegada (`_process_arrival`): así la cadena de llegadas nunca se corta.
         draw = self._draw_exponential("llegada", self.config.mean_interarrival_time)
         self._schedule(Event(time=self.clock + draw.value, type=EventType.ARRIVAL))
 
     def _pop_next_event(self) -> Event:
+        # Saca el evento con menor `time` del heap (y menor `seq` en caso de empate).
         _, _, event = heapq.heappop(self._event_heap)
         return event
 
     def _update_max_queue_length(self) -> None:
+        # Se llama cada vez que la cola cambia de tamaño (entra o sale un
+        # cliente), para no perderse ningún máximo intermedio.
         self.max_queue_length = max(self.max_queue_length, len(self.queue))
 
     def _select_free_copier(self) -> Copier:
         """Entre las copiadoras libres, la de mayor `usage_remaining` (más
         lejana a fallar); desempate por menor id (SUPUESTOS.md #5 y #6)."""
         free = [c for c in self.copiers if c.is_free()]
+        # `-c.usage_remaining` invierte el orden para que `min` devuelva la de
+        # MAYOR uso restante; en empate, gana la de menor id.
         return min(free, key=lambda c: (-c.usage_remaining, c.id))
 
     def _change_copier_state(self, copier: Copier, new_state: CopierState) -> None:
@@ -118,13 +140,15 @@ class Simulation:
         (DISEÑO.md §10.2) antes de cambiarlo. Único punto de mutación de
         `copier.state` — así el % ocupación/mantenimiento siempre es
         consistente, sin importar desde dónde se dispare el cambio."""
-        elapsed = self.clock - copier.state_since
+        elapsed = self.clock - copier.state_since  # Cuánto duró el estado que está por terminar.
         if copier.state is CopierState.BUSY:
             copier.busy_time += elapsed
         elif copier.state is CopierState.MAINTENANCE:
             copier.maintenance_time += elapsed
+        # Si estaba FREE no se acumula nada aparte: el tiempo libre se deriva
+        # al final como `total_time - busy_time - maintenance_time`.
         copier.state = new_state
-        copier.state_since = self.clock
+        copier.state_since = self.clock  # Arranca a contar el nuevo estado desde ahora.
 
     def _start_maintenance(self, copier: Copier, *, corrective: bool) -> None:
         """Manda una copiadora a mantenimiento (DISEÑO.md §8.1/§8.2).
@@ -133,12 +157,14 @@ class Simulation:
         llama desde dentro del procesamiento de otro evento.
         """
         self._change_copier_state(copier, CopierState.MAINTENANCE)
-        copier.current_client = None
-        end_time = self.clock + self.config.maintenance_duration
+        copier.current_client = None  # Por las dudas: en mantenimiento no puede tener cliente asignado.
+        end_time = self.clock + self.config.maintenance_duration  # Duración fija (no aleatoria).
         copier.maintenance_end_time = end_time
         self._schedule(
             Event(time=end_time, type=EventType.MAINTENANCE_END, copier_id=copier.id)
         )
+        # Solo difiere en qué contador incrementa; la mecánica es idéntica
+        # sea correctivo o preventivo.
         if corrective:
             self.corrective_maintenance_count += 1
         else:
@@ -152,13 +178,19 @@ class Simulation:
         (una llegada solo puede reducir la cantidad de libres, nunca dejar a
         las 3 libres a la vez)."""
         if not all(c.state is CopierState.FREE for c in self.copiers):
-            return
+            return  # No se cumple la condición: no pasa nada.
+        # Ojo: acá el orden es al revés que en `_select_free_copier` (sin el
+        # signo negativo) porque acá se busca la MENOR `usage_remaining`.
         copier = min(self.copiers, key=lambda c: (c.usage_remaining, c.id))
         self._start_maintenance(copier, corrective=False)
 
     def _assign_client(self, copier: Copier, client: Client) -> None:
+        # Punto único donde un cliente pasa a ser atendido (desde una
+        # Llegada con copiadora libre, o desde la cola al liberarse una).
         client.service_start_time = self.clock
         if client.waited:
+            # Solo suma a las estadísticas de espera si realmente esperó
+            # (ver `Client.waited`); si lo atendieron al instante, no cuenta.
             self.total_wait_time += client.service_start_time - client.arrival_time
             self.clients_that_waited += 1
 
@@ -170,13 +202,17 @@ class Simulation:
         self._schedule(Event(time=end_time, type=EventType.SERVICE_END, copier_id=copier.id))
 
     def _process_arrival(self, event: Event) -> None:
+        # 1) Programar la SIGUIENTE llegada primero (para no olvidarse).
         self._schedule_next_arrival()
 
+        # 2) Crear el cliente que acaba de llegar.
         client = Client(id=next(self._next_client_id), arrival_time=self.clock)
         free_copiers = [c for c in self.copiers if c.is_free()]
         if free_copiers:
+            # 3a) Hay copiadora libre: lo atienden de inmediato.
             self._assign_client(self._select_free_copier(), client)
         else:
+            # 3b) No hay copiadora libre: se une a la cola común.
             self.queue.append(client)
             self._update_max_queue_length()
 
@@ -187,8 +223,9 @@ class Simulation:
         assert finished_client is not None
         assert finished_client.service_start_time is not None
 
+        # Cuánto duró realmente esta atención (para descontar del uso de la copiadora).
         service_duration = self.clock - finished_client.service_start_time
-        copier.current_client = None
+        copier.current_client = None  # El cliente se descarta acá (objeto temporal, D5).
         copier.service_end_time = None
         self.clients_served += 1
         copier.consume_usage(service_duration)
@@ -199,23 +236,32 @@ class Simulation:
             # terminar, se manda a mantenimiento.
             self._start_maintenance(copier, corrective=True)
         elif self.queue:
+            # No necesita mantenimiento y hay gente esperando: atiende al
+            # siguiente de la cola (FIFO) sin quedar libre ni un instante.
             next_client = self.queue.popleft()
             self._update_max_queue_length()
             self._assign_client(copier, next_client)
         else:
+            # No necesita mantenimiento y no hay cola: queda libre.
             self._change_copier_state(copier, CopierState.FREE)
 
+        # Se chequea siempre al final, sin importar por cuál de las 3 ramas
+        # se pasó (una copiadora recién liberada podría completar el trío).
         self._maybe_trigger_preventive_maintenance()
 
     def _process_maintenance_end(self, event: Event) -> None:
         assert event.copier_id is not None
         copier = self.copiers[event.copier_id]
 
+        # Al salir de mantenimiento (correctivo o preventivo) se resetea el
+        # contador de uso con un nuevo umbral sorteado.
         draw = self._draw_uniform_threshold(copier.id)
         copier.usage_threshold = draw.value
         copier.usage_remaining = draw.value
         copier.maintenance_end_time = None
 
+        # Misma lógica que al terminar una atención: si hay cola, atiende;
+        # si no, queda libre.
         if self.queue:
             next_client = self.queue.popleft()
             self._update_max_queue_length()
@@ -226,6 +272,9 @@ class Simulation:
         self._maybe_trigger_preventive_maintenance()
 
     def _snapshot_copier(self, copier: Copier) -> CopierSnapshot:
+        # Convierte el estado "vivo" de una Copier a un snapshot inmutable
+        # para guardar en el vector de estado (no se puede referenciar el
+        # objeto `Copier` directamente porque sigue mutando en iteraciones futuras).
         return CopierSnapshot(
             id=copier.id,
             state=copier.state.name,
@@ -237,6 +286,9 @@ class Simulation:
         )
 
     def _record_state_row(self, event_type: str, copier_id: int | None = None) -> None:
+        # Arma la fila del vector de estado correspondiente a la iteración
+        # actual, con una foto completa del sistema (copiadoras + cola) y los
+        # RND/valores sorteados durante el procesamiento de este evento.
         row = StateRow(
             iteration=self.iteration,
             clock=self.clock,
@@ -258,6 +310,8 @@ class Simulation:
             ],
         )
         self.state_vector.append(row)
+        # Limpia los buffers de RND para que la próxima fila no arrastre
+        # sorteos de este evento.
         self._current_draws = {}
         self._current_umbral_draws = []
 
@@ -265,6 +319,9 @@ class Simulation:
         """Cierra el último intervalo abierto de cada copiadora hasta el
         reloj final, para que el % ocupación/mantenimiento contemple también
         el estado en el que quedó cada una al cortar la simulación."""
+        # Truco: "cambiar" al mismo estado en el que ya está fuerza a
+        # `_change_copier_state` a sumar el tramo final (desde `state_since`
+        # hasta el `clock` de corte) sin alterar el estado en sí.
         for copier in self.copiers:
             self._change_copier_state(copier, copier.state)
 
@@ -276,7 +333,7 @@ class Simulation:
         avg_wait_time = (
             self.total_wait_time / self.clients_that_waited
             if self.clients_that_waited > 0
-            else None
+            else None  # Evita división por cero si nadie esperó nunca.
         )
         return SimulationSummary(
             total_time=self.clock,
@@ -293,6 +350,8 @@ class Simulation:
         )
 
     def _process_event(self, event: Event) -> None:
+        # Despachador simple: delega en el handler correspondiente según el
+        # tipo de evento. SIMULATION_END no pasa por acá (se maneja aparte en `run()`).
         if event.type is EventType.ARRIVAL:
             self._process_arrival(event)
         elif event.type is EventType.SERVICE_END:
@@ -310,15 +369,21 @@ class Simulation:
         Corta al llegar a `max_iterations` o al procesar `SIMULATION_END`, lo
         que ocurra primero (§8 del prompt).
         """
+        # Bucle principal: mientras queden iteraciones disponibles y eventos
+        # pendientes en el heap, seguí procesando.
         while self.iteration < self.config.max_iterations and self._event_heap:
-            event = self._pop_next_event()
+            event = self._pop_next_event()  # Siempre el evento más próximo en el tiempo.
             if event.type is EventType.SIMULATION_END:
+                # Corte por tiempo límite: se actualiza el reloj pero NO se
+                # cuenta como iteración ni se procesa como los otros 4 tipos.
                 self.clock = event.time
                 break
 
-            self.clock = event.time
+            self.clock = event.time  # Avanza el reloj de la simulación al momento del evento.
             self.iteration += 1
-            self._process_event(event)
-            self._record_state_row(event.type.name, event.copier_id)
+            self._process_event(event)  # Ejecuta la lógica específica del tipo de evento.
+            self._record_state_row(event.type.name, event.copier_id)  # Registra la fila resultante.
 
+        # Al cortar (por cualquiera de los dos motivos), cierra la
+        # contabilidad de tiempo de cada copiadora hasta el reloj final.
         self._finalize_copier_time_accounting()
