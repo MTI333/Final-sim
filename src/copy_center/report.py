@@ -123,7 +123,8 @@ ClientSlotMap = dict[int, tuple[int, str, float]]
 
 
 def compute_client_slots(state_vector: list[StateRow],
-                          max_client_slots: int = _DEFAULT_CLIENT_SLOTS) -> list[ClientSlotMap]:
+                          max_client_slots: int | None = _DEFAULT_CLIENT_SLOTS,
+                          ) -> list[ClientSlotMap]:
     """Asigna a cada cliente vivo (en atención o en cola) un slot 1..N, uno
     por fila del vector de estado — igual que la sección "CLIENTE 1..N" de
     `VectorEstado_CentroCopiado.xlsx`: la asignación es persistente (un
@@ -132,13 +133,16 @@ def compute_client_slots(state_vector: list[StateRow],
     registra `StateRow` (`copiers[].client_id`, `clients_in_queue`), sin
     tocar el motor (DECISIONES.md D13).
 
-    Si en algún momento hay más clientes vivos que `max_client_slots`, los
-    que no entran simplemente no aparecen en ningún slot ese tramo (D18: es
-    una vista de demo con capacidad fija, no el diseño del entregable real,
-    que no tiene ese límite — DECISIONES.md D5/D12)."""
+    `max_client_slots=None` no pone techo: se crea un slot nuevo cada vez
+    que hace falta y no hay ninguno libre para reciclar (crece exactamente
+    a la concurrencia real de la corrida, ni más ni menos). Con un entero,
+    los clientes que no entran en ese cupo simplemente no aparecen en
+    ningún slot ese tramo (D18: pensado para corridas chicas de demo, no
+    para el entregable real, que no tiene ese límite — D5/D12)."""
     client_arrival: dict[int, float] = {}
     slot_of_client: dict[int, int] = {}
-    free_slots = list(range(1, max_client_slots + 1))
+    free_slots = [] if max_client_slots is None else list(range(1, max_client_slots + 1))
+    next_new_slot = 1
     per_row: list[ClientSlotMap] = []
 
     for row in state_vector:
@@ -161,9 +165,12 @@ def compute_client_slots(state_vector: list[StateRow],
             key=lambda cid: client_arrival[cid],
         )
         for cid in new_clients:
-            if not free_slots:
-                break
-            slot_of_client[cid] = free_slots.pop(0)
+            if free_slots:
+                slot_of_client[cid] = free_slots.pop(0)
+            elif max_client_slots is None:
+                slot_of_client[cid] = next_new_slot
+                next_new_slot += 1
+            # si tiene techo y está lleno, este cliente no entra este tramo.
 
         per_row.append({
             slot: (cid, alive[cid], client_arrival[cid])
@@ -171,6 +178,13 @@ def compute_client_slots(state_vector: list[StateRow],
         })
 
     return per_row
+
+
+def slots_in_use(slots_by_row: list[ClientSlotMap]) -> int:
+    """Cantidad real de slots usados en toda la corrida — para saber cuántas
+    columnas "CLIENTE N" hace falta renderizar cuando `compute_client_slots`
+    se llamó sin techo (`max_client_slots=None`)."""
+    return max((max(row, default=0) for row in slots_by_row), default=0)
 
 
 def format_row_with_clients(row: StateRow, slots: ClientSlotMap,
@@ -220,29 +234,31 @@ def render_full_report(state_vector: list[StateRow], n_copiers: int, j: int, i: 
 
 
 def render_full_report_with_clients(state_vector: list[StateRow], n_copiers: int, j: int, i: int,
-                                     max_client_slots: int = _DEFAULT_CLIENT_SLOTS) -> str:
+                                     max_client_slots: int | None = _DEFAULT_CLIENT_SLOTS) -> str:
     """Igual que `render_full_report`, pero con la sección "CLIENTE 1..N" de
     la planilla de referencia agregada (`compute_client_slots`). Pensado
     para corridas chicas de demo (DECISIONES.md D18), no para el entregable
-    real."""
+    real. `max_client_slots=None` no pone techo: muestra tantas columnas
+    "CLIENTE N" como concurrencia real haya tenido la corrida."""
     window = state_vector[j : j + i]
     last = state_vector[-1]
     slots_by_row = compute_client_slots(state_vector, max_client_slots)
+    n_slots = slots_in_use(slots_by_row)
     window_slots = slots_by_row[j : j + i]
 
     lines = [
         f"Vector de estado — filas {j} a {j + len(window) - 1} de {len(state_vector) - 1} "
         f"(iteración final={last.iteration}, reloj final={last.clock:.2f} min)",
-        format_header_with_clients(n_copiers, max_client_slots),
+        format_header_with_clients(n_copiers, n_slots),
     ]
     lines += [
-        format_row_with_clients(r, slots, max_client_slots)
+        format_row_with_clients(r, slots, n_slots)
         for r, slots in zip(window, window_slots)
     ]
     lines.append("")
     lines.append(f"Última fila (iteración {last.iteration}, reloj={last.clock:.2f} min):")
-    lines.append(format_header_with_clients(n_copiers, max_client_slots))
-    lines.append(format_row_with_clients(last, slots_by_row[-1], max_client_slots))
+    lines.append(format_header_with_clients(n_copiers, n_slots))
+    lines.append(format_row_with_clients(last, slots_by_row[-1], n_slots))
     return "\n".join(lines)
 
 

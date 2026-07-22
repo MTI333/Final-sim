@@ -57,14 +57,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=defaults.seed,
                          help=f"Semilla del generador aleatorio, para reproducibilidad "
                               f"(default: {defaults.seed}).")
-    parser.add_argument("--show-clients", type=int, nargs="?", const=5, default=None,
-                         metavar="N",
+    parser.add_argument("--show-clients", type=str, nargs="?", const="all", default=None,
+                         metavar="N|all",
                          help="Agrega la sección 'CLIENTE 1..N' (formato "
                               "VectorEstado_CentroCopiado, DECISIONES.md D18) al vector de "
-                              "estado, con N slots (default 5 si se pasa sin valor). Pensado "
-                              "para corridas chicas de demo — con colas grandes, clientes de "
-                              "más simplemente no aparecen en ningún slot; el entregable real "
-                              "no usa esta vista (default: desactivado).")
+                              "estado: 'all' (default si se pasa sin valor) muestra tantas "
+                              "columnas como clientes concurrentes haya tenido la corrida, sin "
+                              "techo; un entero N los capa a N slots (los de más no aparecen en "
+                              "ningún slot ese tramo). Pensado para corridas chicas de demo — el "
+                              "entregable real no usa esta vista (default: desactivado).")
     return parser
 
 
@@ -77,9 +78,10 @@ def main(argv: list[str] | None = None) -> None:
     sim.run()
 
     if show_clients is not None:
+        max_client_slots = None if show_clients == "all" else int(show_clients)
         print(render_full_report_with_clients(
             sim.state_vector, config.n_copiers, config.report_from_iteration,
-            config.report_row_count, max_client_slots=show_clients,
+            config.report_row_count, max_client_slots=max_client_slots,
         ))
     else:
         print(render_full_report(

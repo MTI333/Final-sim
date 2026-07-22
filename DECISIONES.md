@@ -195,17 +195,21 @@ hasta irse, no se reordena de fila a fila) como una vista **separada y opt-in**,
 diseño del entregable real: `report.compute_client_slots` calcula la asignación de slots
 enteramente a partir de lo que ya registra `StateRow` (`copiers[].client_id`,
 `clients_in_queue`), sin tocar `Simulation` (DECISIONES.md D13). En la CLI es el flag
-`--show-clients [N]` (`render_full_report_with_clients`); en la webapp, un checkbox en el
+`--show-clients [N|all]` (`render_full_report_with_clients`); en la webapp, un checkbox en el
 formulario. Ambas rutas comparten `compute_client_slots`.
-**Justificación:** la planilla de referencia asume una cantidad chica y acotada de clientes vivos
-a la vez (5 slots fijos), pero el motor no tiene ese límite — con SUPUESTOS.md #1 decidido en modo
-literal la cola puede crecer sin techo (D5/D12). Con más clientes vivos que slots, los que no
-entran simplemente no aparecen en ningún slot ese tramo — aceptable porque esta vista es
-explícitamente para corridas chicas de demo, no para la corrida real de entrega, que sigue usando
-la tabla estándar (solo longitud de cola, D5/D12 sin cambios).
+**Sin techo por default:** a diferencia de la planilla de referencia (5 slots fijos),
+`max_client_slots=None` (CLI: `--show-clients` sin valor o `all`; webapp: el checkbox solo) no
+capa nada — crea un slot nuevo cada vez que hace falta, así que la cantidad de columnas
+"CLIENTE N" renderizadas (`report.slots_in_use`) es exactamente la concurrencia máxima real de la
+corrida, ni más ni menos. Sigue existiendo la opción de capar a un N fijo (`--show-clients N`)
+para corridas donde de verdad se necesite acotar.
+**Justificación:** sigue siendo una vista de demo, no el diseño del entregable real — con
+SUPUESTOS.md #1 decidido en modo literal la cola puede crecer sin techo (D5/D12), así que "sin
+techo" acá solo es seguro para corridas chicas/moderadas como las que se usan para explorar o
+armar la defensa, no para la corrida real de entrega saturada, que sigue usando la tabla estándar
+(solo longitud de cola, D5/D12 sin cambios).
 **Alternativa descartada:** agregar los slots directamente a la tabla estándar (siempre visibles)
-— rompería silenciosamente en la corrida real saturada (SUPUESTOS #1), y para corridas chicas
-igual hay que elegir un N arbitrario que no significa nada en el caso general.
+— rompería en la corrida real saturada (SUPUESTOS #1) con miles de columnas.
 
 ---
 

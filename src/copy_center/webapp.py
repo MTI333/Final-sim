@@ -22,7 +22,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from copy_center.config import SimulationConfig
-from copy_center.report import ClientSlotMap, compute_client_slots, event_label, state_label
+from copy_center.report import (
+    ClientSlotMap,
+    compute_client_slots,
+    event_label,
+    slots_in_use,
+    state_label,
+)
 from copy_center.simulation import Simulation
 from copy_center.state_vector import StateRow
 from copy_center.statistics import SimulationSummary
@@ -218,8 +224,8 @@ def render_form(config: SimulationConfig, *, show_clients: bool = False) -> str:
     {"".join(inputs)}
   </div>
   <label class="checkbox-field"><input type="checkbox" name="show_clients"{checked}>
-    Mostrar objetos de cliente (CLIENTE 1..5, formato VectorEstado_CentroCopiado — solo para
-    corridas chicas de demo, DECISIONES.md D18)</label>
+    Mostrar objetos de cliente (todos los que estén vivos a la vez, sin techo — formato
+    VectorEstado_CentroCopiado, solo para corridas chicas de demo, DECISIONES.md D18)</label>
   <button type="submit">Ejecutar simulación</button>
 </form>
 """
@@ -576,7 +582,7 @@ def render_table(rows: list[StateRow], n_copiers: int, *, title: str,
 
 
 def render_page(config: SimulationConfig, sim: Simulation, *, show_clients: bool = False,
-                 max_client_slots: int = 5) -> str:
+                 max_client_slots: int | None = None) -> str:
     summary = sim.summary()
     total_rows = len(sim.state_vector)
     j = max(0, min(config.report_from_iteration, max(0, total_rows - 1)))
@@ -599,9 +605,11 @@ def render_page(config: SimulationConfig, sim: Simulation, *, show_clients: bool
     )
 
     window_slots = last_slots = None
+    n_slots = 0
     last_title = "Última fila (sin objetos temporales)"
     if show_clients:
         slots_by_row = compute_client_slots(sim.state_vector, max_client_slots)
+        n_slots = slots_in_use(slots_by_row)
         window_slots = slots_by_row[j: j + len(window)]
         last_slots = [slots_by_row[-1]]
         last_title = "Última fila"
@@ -626,9 +634,9 @@ def render_page(config: SimulationConfig, sim: Simulation, *, show_clients: bool
 {render_queue_chart(sim.state_vector, summary, max_iteration)}
 {render_pagination(config, total_rows, show_clients=show_clients)}
 {render_table(window, config.n_copiers, title=window_title, highlight_iteration=max_iteration,
-              client_slots=window_slots, max_client_slots=max_client_slots)}
+              client_slots=window_slots, max_client_slots=n_slots)}
 {render_table([last], config.n_copiers, title=last_title, highlight_iteration=max_iteration,
-              client_slots=last_slots, max_client_slots=max_client_slots)}
+              client_slots=last_slots, max_client_slots=n_slots)}
 <footer>Cada carga de página corre la simulación completa desde el principio con los
 parámetros del formulario (no hay estado guardado entre requests) — DECISIONES.md.</footer>
 </body>

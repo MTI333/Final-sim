@@ -696,3 +696,17 @@ reportado).
 memoria + este hang) — conviene, ante cualquier "no veo los cambios", chequear primero
 `ps aux | grep copy_center.webapp` (¿cuándo arrancó? ¿responde un curl propio?) antes de asumir
 que el código está mal.
+
+### Hecho (cont.) — sección CLIENTE sin techo de 5 slots fijos
+El usuario pidió mostrar *todos* los clientes, no solo 5. `compute_client_slots` ahora acepta
+`max_client_slots=None` (nuevo default en CLI/webapp): en vez de descartar clientes cuando no
+queda slot libre, crea uno nuevo — la cantidad de columnas "CLIENTE N" a renderizar
+(`report.slots_in_use`, nuevo) se deriva de la concurrencia real de la corrida, no de un número
+fijo elegido a mano. CLI: `--show-clients` ahora acepta `N|all` (`all` = sin techo, default si se
+pasa el flag sin valor). Webapp: el checkbox ya no pasa por un N fijo.
+Validado con una corrida de 20 iteraciones (semilla 42, antes cortaba en 5): ahora muestra 7
+columnas de cliente, en CLI y en la webapp reiniciada — coinciden entre sí.
+**Sigue en pie el límite conceptual (D18):** esto es seguro para corridas chicas/moderadas de
+demo; con la tasa degenerada de SUPUESTOS #1 la cola no tiene techo y "sin límite" generaría una
+tabla con miles de columnas — la tabla estándar del entregable real no cambió y sigue sin
+enumerar clientes (D5/D12).
