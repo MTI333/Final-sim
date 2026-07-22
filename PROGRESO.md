@@ -673,3 +673,26 @@ cola) con asignación de slot persistente, como en la planilla de referencia (DE
 - Validado: compilación limpia, comparación campo a campo CLI vs. webapp para la misma
   semilla/parámetros (coinciden), y contra el servidor real reiniciado (`curl` con
   `show_clients=on`). Snapshot publicado como Artifact.
+
+### Hecho (cont.) — fix de confiabilidad: `HTTPServer` → `ThreadingHTTPServer`
+El usuario reportó que, después de refrescar el navegador, la página seguía sin mostrar los
+cambios — pero esta vez no era el problema ya conocido de código viejo en memoria (el server ya
+se había reiniciado con el código nuevo). El proceso seguía vivo pero no respondía a nada,
+incluido un `curl` propio: 0% CPU, sin memoria disparada (no era el hang conocido por O(n²) +
+tasa degenerada, que sí sube RAM/CPU) — consistente con una conexión que quedó a medio abrir
+bloqueando el *accept loop*, porque `webapp.py` usaba `http.server.HTTPServer`, que es de un solo
+hilo: una sola conexión sin terminar de mandar el request (o sin terminar de leer la respuesta)
+cuelga el servidor entero para cualquier otro cliente.
+**Fix:** `HTTPServer` → `http.server.ThreadingHTTPServer` (stdlib también, D16 intacto), con
+`daemon_threads = True` para que `Ctrl+C` no quede esperando a un hilo trabado. No hace falta
+ningún cambio de sincronización: cada request instancia su propio `Simulation`/`RandomGenerator`
+(DECISIONES.md D10, sin estado global compartido), así que correr requests en paralelo es seguro
+tal cual.
+**Validado:** se abrió a propósito una conexión TCP con un request HTTP incompleto (nunca
+terminado) y, en simultáneo, un `curl` normal — con el fix, el `curl` respondió `200` igual;
+antes de este cambio eso hubiera colgado el servidor completo (reproduce exactamente el síntoma
+reportado).
+**Nota operativa:** iban dos problemas de servidor "fantasma" en la misma sesión (código viejo en
+memoria + este hang) — conviene, ante cualquier "no veo los cambios", chequear primero
+`ps aux | grep copy_center.webapp` (¿cuándo arrancó? ¿responde un curl propio?) antes de asumir
+que el código está mal.

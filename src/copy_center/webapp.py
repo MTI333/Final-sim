@@ -18,7 +18,7 @@ import argparse
 import html
 import json
 import math
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlencode, urlparse
 
 from copy_center.config import SimulationConfig
@@ -703,7 +703,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args(argv)
 
-    server = HTTPServer((args.host, args.port), _Handler)
+    server = ThreadingHTTPServer((args.host, args.port), _Handler)
+    server.daemon_threads = True  # que Ctrl+C no quede esperando a un hilo colgado
     print(f"Interfaz web en http://{args.host}:{args.port}/  (Ctrl+C para cortar)")
     try:
         server.serve_forever()
